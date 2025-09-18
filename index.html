@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Speech Transcription</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .controls {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        button {
+            background: #007AFF;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 0 10px;
+            transition: background-color 0.2s;
+        }
+        
+        button:hover {
+            background: #0056CC;
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .recording {
+            background: #FF3B30 !important;
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            padding: 10px;
+            border-radius: 6px;
+            font-weight: 500;
+        }
+        
+        .status.connected {
+            background: #E8F5E8;
+            color: #2D5A2D;
+        }
+        
+        .status.disconnected {
+            background: #FFE8E8;
+            color: #8B0000;
+        }
+        
+        .status.recording {
+            background: #FFF3CD;
+            color: #856404;
+        }
+        
+        .transcript-container {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 20px;
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .transcript-line {
+            margin: 8px 0;
+            padding: 8px 12px;
+            border-radius: 6px;
+            transition: background-color 0.3s;
+        }
+        
+        .transcript-line.partial {
+            background: #E3F2FD;
+            color: #1565C0;
+            font-style: italic;
+            border-left: 4px solid #2196F3;
+        }
+        
+        .transcript-line.final {
+            background: #E8F5E8;
+            color: #2E7D32;
+            border-left: 4px solid #4CAF50;
+        }
+        
+        .transcript-line.final:last-child {
+            background: #F3E5F5;
+            color: #7B1FA2;
+            border-left: 4px solid #9C27B0;
+        }
+        
+        .error {
+            background: #FFEBEE;
+            color: #C62828;
+            padding: 10px;
+            border-radius: 6px;
+            margin: 10px 0;
+            border-left: 4px solid #F44336;
+        }
+        
+        .info {
+            background: #E3F2FD;
+            color: #1565C0;
+            padding: 10px;
+            border-radius: 6px;
+            margin: 10px 0;
+            border-left: 4px solid #2196F3;
+        }
+        
+        .audio-level {
+            width: 100%;
+            height: 4px;
+            background: #e0e0e0;
+            border-radius: 2px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        
+        .audio-level-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #FFC107, #FF5722);
+            width: 0%;
+            transition: width 0.1s;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Real-time Speech Transcription</h1>
+        
+        <div class="controls">
+            <button id="startBtn">Start Recording</button>
+            <button id="stopBtn" disabled>Stop Recording</button>
+            <button id="clearBtn">Clear Transcript</button>
+        </div>
+        
+        <div id="status" class="status disconnected">
+            Disconnected - Click "Start Recording" to begin
+        </div>
+        
+        <div class="audio-level">
+            <div id="audioLevel" class="audio-level-bar"></div>
+        </div>
+        
+        <div id="transcript" class="transcript-container">
+            <div class="info">
+                <strong>Instructions:</strong><br>
+                1. Click "Start Recording" to begin<br>
+                2. Grant microphone permission when prompted<br>
+                3. Speak clearly into your microphone<br>
+                4. Watch as your speech is transcribed in real-time<br>
+                5. Partial results appear in blue, final results in green
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Audio processing utilities
+        const AudioUtils = {
+            PCM_BUFFER_SIZE: 1024,
+            SAMPLE_RATE: 16000,
+            CHUNK_DURATION_MS: 64,
+            
+            createAudioContext() {
+                return new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: this.SAMPLE_RATE
+                });
+            },
+            
+            convertFloat32ToInt16(float32Array) {
+                const int16Array = new Int16Array(float32Array.length);
+                for (let i = 0; i < float32Array.length; i++) {
+                    int16Array[i] = Math.max(-32768, Math.min(32767, float32Array[i] * 32768));
+                }
+                return int16Array;
+            },
+            
+            createScriptProcessor(audioContext, onAudioProcess) {
+                const processor = audioContext.createScriptProcessor(
+                    this.PCM_BUFFER_SIZE, 1, 1
+                );
+                processor.onaudioprocess = onAudioProcess;
+                return processor;
+            }
+        };
+
+        // WebSocket connection manager
+        class WebSocketManager {
+            constructor(onMessage, onStatusChange) {
+                this.ws = null;
+                this.onMessage = onMessage;
+                this.onStatusChange = onStatusChange;
+            }
+            
+            async connect() {
+                return new Promise((resolve, reject) => {
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const wsUrl = `${protocol}//${window.location.host}/ws`;
+                    
+                    this.ws = new WebSocket(wsUrl);
+                    
+                    this.ws.onopen = () => {
+                        console.log('WebSocket connected');
+                        this.onStatusChange('Connected - Ready to transcribe', 'connected');
+                        resolve();
+                    };
+                    
+                    this.ws.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            this.onMessage(data.text, data.partial);
+                        } catch (e) {
+                            this.onMessage(event.data, true);
+                        }
+                    };
+                    
+                    this.ws.onclose = () => {
+                        console.log('WebSocket disconnected');
+                        this.onStatusChange('Disconnected', 'disconnected');
+                    };
+                    
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        reject(error);
+                    };
+                });
+            }
+            
+            send(data) {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(data);
+                }
+            }
+            
+            close() {
+                if (this.ws) {
+                    this.ws.close();
+                    this.ws = null;
+                }
+            }
+        }
+
+        // Audio capture and processing
+        class AudioCapture {
+            constructor(onAudioData, onLevelUpdate) {
+                this.audioContext = null;
+                this.processor = null;
+                this.analyser = null;
+                this.onAudioData = onAudioData;
+                this.onLevelUpdate = onLevelUpdate;
+                this.isActive = false;
+            }
+            
+            async start() {
+                try {
+                    const stream = await this.getUserMedia();
+                    this.audioContext = AudioUtils.createAudioContext();
+                    this.setupAudioProcessing(stream);
+                    this.isActive = true;
+                    return true;
+                } catch (error) {
+                    console.error('Failed to start audio capture:', error);
+                    throw error;
+                }
+            }
+            
+            async getUserMedia() {
+                return navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: AudioUtils.SAMPLE_RATE,
+                        channelCount: 1,
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                });
+            }
+            
+            setupAudioProcessing(stream) {
+                const source = this.audioContext.createMediaStreamSource(stream);
+                
+                // Setup analyser for level monitoring
+                this.analyser = this.audioContext.createAnalyser();
+                this.analyser.fftSize = 256;
+                source.connect(this.analyser);
+                
+                // Setup audio processor
+                this.processor = AudioUtils.createScriptProcessor(
+                    this.audioContext,
+                    (event) => this.handleAudioProcess(event)
+                );
+                
+                source.connect(this.processor);
+                this.processor.connect(this.audioContext.destination);
+                
+                this.startLevelMonitoring();
+            }
+            
+            handleAudioProcess(event) {
+                if (!this.isActive) return;
+                
+                const channelData = event.inputBuffer.getChannelData(0);
+                const pcmData = AudioUtils.convertFloat32ToInt16(channelData);
+                this.onAudioData(pcmData.buffer);
+            }
+            
+            startLevelMonitoring() {
+                const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+                
+                const updateLevel = () => {
+                    if (this.isActive) {
+                        this.analyser.getByteFrequencyData(dataArray);
+                        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                        const percentage = (average / 255) * 100;
+                        this.onLevelUpdate(percentage);
+                        requestAnimationFrame(updateLevel);
+                    }
+                };
+                updateLevel();
+            }
+            
+            stop() {
+                this.isActive = false;
+                
+                if (this.processor) {
+                    this.processor.disconnect();
+                    this.processor = null;
+                }
+                
+                if (this.audioContext && this.audioContext.state !== 'closed') {
+                    this.audioContext.close();
+                }
+            }
+        }
+
+        // Transcript display manager
+        class TranscriptManager {
+            constructor(container) {
+                this.container = container;
+                this.instructions = `
+                    <div class="info">
+                        <strong>Instructions:</strong><br>
+                        1. Click "Start Recording" to begin<br>
+                        2. Grant microphone permission when prompted<br>
+                        3. Speak clearly into your microphone<br>
+                        4. Watch as your speech is transcribed in real-time<br>
+                        5. Partial results appear in blue, final results in green
+                    </div>
+                `;
+                this.showInstructions();
+            }
+            
+            showInstructions() {
+                this.container.innerHTML = this.instructions;
+            }
+            
+            addTranscript(text, isPartial = true) {
+                this.removePartialTranscript();
+                
+                const line = document.createElement('div');
+                line.className = `transcript-line ${isPartial ? 'partial' : 'final'}`;
+                line.textContent = text;
+                this.container.appendChild(line);
+                
+                this.scrollToBottom();
+            }
+            
+            removePartialTranscript() {
+                const existingPartial = this.container.querySelector('.transcript-line.partial');
+                if (existingPartial) {
+                    existingPartial.remove();
+                }
+            }
+            
+            addError(message) {
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error';
+                errorDiv.textContent = message;
+                this.container.appendChild(errorDiv);
+                this.scrollToBottom();
+            }
+            
+            scrollToBottom() {
+                this.container.scrollTop = this.container.scrollHeight;
+            }
+        }
+
+        // UI state manager
+        class UIManager {
+            constructor() {
+                this.elements = {
+                    startBtn: document.getElementById('startBtn'),
+                    stopBtn: document.getElementById('stopBtn'),
+                    clearBtn: document.getElementById('clearBtn'),
+                    status: document.getElementById('status'),
+                    audioLevel: document.getElementById('audioLevel')
+                };
+            }
+            
+            updateRecordingState(isRecording) {
+                this.elements.startBtn.disabled = isRecording;
+                this.elements.stopBtn.disabled = !isRecording;
+                
+                if (isRecording) {
+                    this.elements.startBtn.classList.add('recording');
+                } else {
+                    this.elements.startBtn.classList.remove('recording');
+                }
+            }
+            
+            updateStatus(message, type) {
+                this.elements.status.textContent = message;
+                this.elements.status.className = `status ${type}`;
+            }
+            
+            updateAudioLevel(percentage) {
+                this.elements.audioLevel.style.width = percentage + '%';
+            }
+        }
+
+        // Main application controller
+        class SpeechTranscriber {
+            constructor() {
+                this.ui = new UIManager();
+                this.transcript = new TranscriptManager(document.getElementById('transcript'));
+                this.wsManager = new WebSocketManager(
+                    (text, isPartial) => this.transcript.addTranscript(text, isPartial),
+                    (message, type) => this.ui.updateStatus(message, type)
+                );
+                this.audioCapture = new AudioCapture(
+                    (audioData) => this.wsManager.send(audioData),
+                    (level) => this.ui.updateAudioLevel(level)
+                );
+                
+                this.isRecording = false;
+                this.setupEventListeners();
+            }
+            
+            setupEventListeners() {
+                this.ui.elements.startBtn.addEventListener('click', () => this.startRecording());
+                this.ui.elements.stopBtn.addEventListener('click', () => this.stopRecording());
+                this.ui.elements.clearBtn.addEventListener('click', () => this.transcript.showInstructions());
+            }
+            
+            async startRecording() {
+                try {
+                    await this.wsManager.connect();
+                    await this.audioCapture.start();
+                    
+                    this.isRecording = true;
+                    this.ui.updateRecordingState(true);
+                    this.ui.updateStatus('Recording - Speak into your microphone', 'recording');
+                    
+                } catch (error) {
+                    console.error('Error starting recording:', error);
+                    this.transcript.addError('Failed to start recording: ' + error.message);
+                }
+            }
+            
+            stopRecording() {
+                this.audioCapture.stop();
+                this.wsManager.send('END');
+                this.wsManager.close();
+                
+                this.isRecording = false;
+                this.ui.updateRecordingState(false);
+                this.ui.updateStatus('Stopped - Click "Start Recording" to begin again', 'disconnected');
+            }
+        }
+
+        // Initialize application
+        document.addEventListener('DOMContentLoaded', () => {
+            new SpeechTranscriber();
+        });
+    </script>
+</body>
+</html>
